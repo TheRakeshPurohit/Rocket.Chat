@@ -1,27 +1,28 @@
-import { RoomType } from '@rocket.chat/core-typings';
+import type { RoomType } from '@rocket.chat/core-typings';
 import { Option, Menu } from '@rocket.chat/fuselage';
-import { useMutableCallback } from '@rocket.chat/fuselage-hooks';
+import { useEffectEvent } from '@rocket.chat/fuselage-hooks';
+import type { TranslationKey, Fields } from '@rocket.chat/ui-contexts';
 import {
+	useRouter,
 	useSetModal,
 	useToastMessageDispatch,
-	useRoute,
 	useUserSubscription,
 	useSetting,
 	usePermission,
 	useMethod,
 	useTranslation,
-	TranslationKey,
-	Fields,
 	useEndpoint,
 } from '@rocket.chat/ui-contexts';
-import React, { memo, ReactElement, useMemo } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import type { ReactElement } from 'react';
+import { memo, useMemo } from 'react';
 
-import { RoomManager } from '../../app/ui-utils/client';
+import { LegacyRoomManager } from '../../app/ui-utils/client';
 import { UiTextContext } from '../../definition/IRoomTypeConfig';
-import { GenericModalDoNotAskAgain } from '../components/GenericModal';
-import { useDontAskAgain } from '../hooks/useDontAskAgain';
+import WarningModal from '../components/WarningModal';
+import { useHideRoomAction } from '../hooks/useHideRoomAction';
 import { roomCoordinator } from '../lib/rooms/roomCoordinator';
-import WarningModal from '../views/admin/apps/WarningModal';
+import { useOmnichannelPrioritiesMenu } from '../omnichannel/hooks/useOmnichannelPrioritiesMenu';
 
 const fields: Fields = {
 	f: true,
@@ -38,16 +39,8 @@ type RoomMenuProps = {
 	type: RoomType;
 	cl?: boolean;
 	name?: string;
+	hideDefaultOptions: boolean;
 };
-
-const closeEndpoints = {
-	p: '/v1/groups.close',
-	c: '/v1/channels.close',
-	d: '/v1/im.close',
-
-	v: '/v1/channels.close',
-	l: '/v1/groups.close',
-} as const;
 
 const leaveEndpoints = {
 	p: '/v1/groups.leave',
@@ -58,22 +51,29 @@ const leaveEndpoints = {
 	l: '/v1/groups.leave',
 } as const;
 
-const RoomMenu = ({ rid, unread, threadUnread, alert, roomOpen, type, cl, name = '' }: RoomMenuProps): ReactElement => {
+const RoomMenu = ({
+	rid,
+	unread,
+	threadUnread,
+	alert,
+	roomOpen,
+	type,
+	cl,
+	name = '',
+	hideDefaultOptions = false,
+}: RoomMenuProps): ReactElement | null => {
 	const t = useTranslation();
 	const dispatchToastMessage = useToastMessageDispatch();
 	const setModal = useSetModal();
 
-	const closeModal = useMutableCallback(() => setModal());
+	const closeModal = useEffectEvent(() => setModal());
 
-	const router = useRoute('home');
+	const router = useRouter();
 
 	const subscription = useUserSubscription(rid, fields);
 	const canFavorite = useSetting('Favorite_Rooms');
 	const isFavorite = Boolean(subscription?.f);
 
-	const dontAskHideRoom = useDontAskAgain('hideRoom');
-
-	const hideRoom = useEndpoint('POST', closeEndpoints[type]);
 	const readMessages = useEndpoint('POST', '/v1/subscriptions.read');
 	const toggleFavorite = useEndpoint('POST', '/v1/rooms.favorite');
 	const leaveRoom = useEndpoint('POST', leaveEndpoints[type]);
@@ -85,6 +85,13 @@ const RoomMenu = ({ rid, unread, threadUnread, alert, roomOpen, type, cl, name =
 	const canLeaveChannel = usePermission('leave-c');
 	const canLeavePrivate = usePermission('leave-p');
 
+	const isOmnichannelRoom = type === 'l';
+	const prioritiesMenu = useOmnichannelPrioritiesMenu(rid);
+
+	const queryClient = useQueryClient();
+
+	const handleHide = useHideRoomAction({ rid, type, name }, { redirect: false });
+
 	const canLeave = ((): boolean => {
 		if (type === 'c' && !canLeaveChannel) {
 			return false;
@@ -95,87 +102,59 @@ const RoomMenu = ({ rid, unread, threadUnread, alert, roomOpen, type, cl, name =
 		return !((cl != null && !cl) || ['d', 'l'].includes(type));
 	})();
 
-	const handleLeave = useMutableCallback(() => {
+	const handleLeave = useEffectEvent(() => {
 		const leave = async (): Promise<void> => {
 			try {
 				await leaveRoom({ roomId: rid });
 				if (roomOpen) {
-					router.push({});
+					router.navigate('/home');
 				}
-				RoomManager.close(rid);
+				LegacyRoomManager.close(rid);
 			} catch (error) {
 				dispatchToastMessage({ type: 'error', message: error });
 			}
 			closeModal();
 		};
 
-		const warnText = roomCoordinator.getRoomDirectives(type)?.getUiText(UiTextContext.LEAVE_WARNING);
+		const warnText = roomCoordinator.getRoomDirectives(type).getUiText(UiTextContext.LEAVE_WARNING);
 
 		setModal(
 			<WarningModal
 				text={t(warnText as TranslationKey, name)}
 				confirmText={t('Leave_room')}
 				close={closeModal}
-				cancel={closeModal}
 				cancelText={t('Cancel')}
 				confirm={leave}
 			/>,
 		);
 	});
 
-	const handleHide = useMutableCallback(async () => {
-		const hide = async (): Promise<void> => {
-			try {
-				await hideRoom({ roomId: rid });
-			} catch (error) {
-				dispatchToastMessage({ type: 'error', message: error });
-			}
-			closeModal();
-		};
-
-		const warnText = roomCoordinator.getRoomDirectives(type)?.getUiText(UiTextContext.HIDE_WARNING);
-
-		if (dontAskHideRoom) {
-			return hide();
-		}
-
-		setModal(
-			<GenericModalDoNotAskAgain
-				variant='danger'
-				confirmText={t('Yes_hide_it')}
-				cancelText={t('Cancel')}
-				onClose={closeModal}
-				onCancel={closeModal}
-				onConfirm={hide}
-				dontAskAgain={{
-					action: 'hideRoom',
-					label: t('Hide_room'),
-				}}
-			>
-				{t(warnText as TranslationKey, name)}
-			</GenericModalDoNotAskAgain>,
-		);
-	});
-
-	const handleToggleRead = useMutableCallback(async () => {
+	const handleToggleRead = useEffectEvent(async () => {
 		try {
+			queryClient.invalidateQueries({
+				queryKey: ['sidebar/search/spotlight'],
+			});
+
 			if (isUnread) {
-				await readMessages({ rid });
+				await readMessages({ rid, readThreads: true });
 				return;
 			}
-			await unreadMessages(null, rid);
+
 			if (subscription == null) {
 				return;
 			}
-			RoomManager.close(subscription.t + subscription.name);
 
-			router.push({});
+			LegacyRoomManager.close(subscription.t + subscription.name);
+
+			router.navigate('/home');
+
+			await unreadMessages(undefined, rid);
 		} catch (error) {
 			dispatchToastMessage({ type: 'error', message: error });
 		}
 	});
 
-	const handleToggleFavorite = useMutableCallback(async () => {
+	const handleToggleFavorite = useEffectEvent(async () => {
 		try {
 			await toggleFavorite({ roomId: rid, favorite: !isFavorite });
 		} catch (error) {
@@ -185,33 +164,53 @@ const RoomMenu = ({ rid, unread, threadUnread, alert, roomOpen, type, cl, name =
 
 	const menuOptions = useMemo(
 		() => ({
-			hideRoom: {
-				label: { label: t('Hide'), icon: 'eye-off' },
-				action: handleHide,
-			},
-			toggleRead: {
-				label: { label: isUnread ? t('Mark_read') : t('Mark_unread'), icon: 'flag' },
-				action: handleToggleRead,
-			},
-			...(canFavorite
-				? {
-						toggleFavorite: {
-							label: {
-								label: isFavorite ? t('Unfavorite') : t('Favorite'),
-								icon: isFavorite ? 'star-filled' : 'star',
+			...(!hideDefaultOptions && {
+				...(isOmnichannelRoom
+					? {}
+					: {
+							hideRoom: {
+								label: { label: t('Hide'), icon: 'eye-off' },
+								action: handleHide,
 							},
-							action: handleToggleFavorite,
-						},
-				  }
-				: {}),
-			...(canLeave && {
-				leaveRoom: {
-					label: { label: t('Leave_room'), icon: 'sign-out' },
-					action: handleLeave,
+						}),
+				toggleRead: {
+					label: { label: isUnread ? t('Mark_read') : t('Mark_unread'), icon: 'flag' },
+					action: handleToggleRead,
 				},
+				...(canFavorite
+					? {
+							toggleFavorite: {
+								label: {
+									label: isFavorite ? t('Unfavorite') : t('Favorite'),
+									icon: isFavorite ? 'star-filled' : 'star',
+								},
+								action: handleToggleFavorite,
+							},
+						}
+					: {}),
+				...(canLeave && {
+					leaveRoom: {
+						label: { label: t('Leave_room'), icon: 'sign-out' },
+						action: handleLeave,
+					},
+				}),
 			}),
+			...(isOmnichannelRoom && prioritiesMenu),
 		}),
-		[t, handleHide, isUnread, handleToggleRead, canFavorite, isFavorite, handleToggleFavorite, canLeave, handleLeave],
+		[
+			hideDefaultOptions,
+			t,
+			handleHide,
+			isUnread,
+			handleToggleRead,
+			canFavorite,
+			isFavorite,
+			handleToggleFavorite,
+			canLeave,
+			handleLeave,
+			isOmnichannelRoom,
+			prioritiesMenu,
+		],
 	);
 
 	return (
@@ -220,9 +219,9 @@ const RoomMenu = ({ rid, unread, threadUnread, alert, roomOpen, type, cl, name =
 			title={t('Options')}
 			mini
 			aria-keyshortcuts='alt'
-			tabIndex={-1}
 			options={menuOptions}
-			renderItem={({ label: { label, icon }, ...props }): JSX.Element => <Option label={label} title={label} icon={icon} {...props} />}
+			maxHeight={300}
+			renderItem={({ label: { label, icon }, ...props }): JSX.Element => <Option label={label} icon={icon} {...props} />}
 		/>
 	);
 };
